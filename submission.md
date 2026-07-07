@@ -65,7 +65,7 @@ Routes are uniformly thin — all input parsing and response formatting happens 
 
 **The root cause:** Python's `datetime.weekday()` returns `6` for Sunday. The increment branch is gated by `days_since_last == 1 and today.weekday() != 6`, meaning that even when a user listens on consecutive calendar days, the streak will **not** increment if the second day happens to be a Sunday — it falls through to the `else` clause instead and resets to 1. This directly contradicts the stated rule ("increments by 1" on a consecutive day) and has no legitimate reason to exist based on the function's documentation.
 
-**My fix and side-effect check:** Remove the `and today.weekday() != 6` clause so the condition is simply `elif days_since_last == 1:`. After the change, verify: (1) streaks still reset correctly when `days_since_last > 1` on every day of the week, (2) the `days_since_last == 0` "already listened today" branch is untouched, (3) a streak that spans a Sunday now increments as expected.
+**My fix and side-effect check:** Removed the `and today.weekday() != 6` clause so the condition is simply `elif days_since_last == 1:`. Verified directly: (1) re-ran the Sunday repro after the fix — the streak now correctly increments from 5 to 6 instead of resetting to 1; (2) confirmed a 3-day gap still correctly resets the streak to 1, so the skip-a-day reset logic is untouched; (3) the `days_since_last == 0` "already listened today" branch was not touched by this change.
 
 ---
 
@@ -79,7 +79,7 @@ Routes are uniformly thin — all input parsing and response formatting happens 
 
 **The root cause:** `RECENT_THRESHOLD` is set to `timedelta(hours=24)`, meaning any listening event from up to a full day ago is treated as "listening now." Nothing in the query logic is broken — the comparison, ordering, and per-friend deduplication all work exactly as written. The bug is a mismatched value: a 24-hour window doesn't match the feature's intent (showing who is currently/very recently listening), so any friend whose most recent listen was, say, 20 hours ago still shows up as if they were listening now.
 
-**My fix and side-effect check:** Reduce `RECENT_THRESHOLD` to a value that actually reflects "listening now" — e.g. `timedelta(minutes=30)`. After the change, verify: (1) the same test (single 20-hour-old event for a friend) now correctly returns an empty/excluding result for that friend, (2) the genuinely-recent seeded events (10–30 min old) still appear correctly, (3) `get_activity_feed()` is untouched, since it intentionally has no recency filter by design and should keep showing all recent history regardless of this constant.
+**My fix and side-effect check:** Reduced `RECENT_THRESHOLD` from `timedelta(hours=24)` to `timedelta(minutes=30)`. Verified directly: (1) re-ran the "stale friend" repro after the fix, giving a friend a single event 20 hours old — they correctly no longer appear in `get_friends_listening_now()`; (2) gave a different friend a genuinely recent event (5 minutes old) and confirmed they still appear; (3) confirmed `get_activity_feed()` is unaffected, since it doesn't use `RECENT_THRESHOLD` at all — it still correctly returned older events (including one 20+ hours old) as part of the unfiltered activity history.
 
 ---
 
@@ -91,14 +91,18 @@ Routes are uniformly thin — all input parsing and response formatting happens 
 
 **The root cause:** `rate_song()` never invokes `create_notification()`. This isn't a broken condition or typo — the notification step was never written for this code path, even though the identical pattern exists one function above it for playlist additions. Ratings are persisted correctly, but the song's original sharer is never informed.
 
-**My fix and side-effect check:** Add a `create_notification()` call in `rate_song()` after the commit, guarded the same way as `add_to_playlist()` (skip notifying if `rater.id == song.shared_by`, so users aren't notified about rating their own songs). Need to decide and document: should re-rating (the `existing` branch) also re-notify, or only the first-time rating? After implementing, verify: (1) rating someone else's song produces exactly one notification for the sharer, (2) rating your own song produces none, (3) the playlist-add notification path is unaffected.
+**My fix and side-effect check:** Added a `create_notification()` call in `rate_song()` after the commit, guarded the same way as `add_to_playlist()` (skip notifying if `rater.id == song.shared_by`). Chose to notify on every call to `rate_song()`, including re-rating (the `existing` branch) — a friend changing their rating is still a new interaction worth surfacing, consistent with how `add_to_playlist()` doesn't special-case repeat adds either. Verified directly: (1) rating someone else's song (`darius` rating `nova`'s "Midnight Drive") produced exactly one new `song_rated` notification for `nova`, with the correct body text and score; (2) rating your own song (`nova` rating her own "Midnight Drive") produced no new notification — confirmed by an unchanged notification count before and after; (3) the existing `song_added_to_playlist` notification path was not touched by this change and still appears correctly in the same notification list.
 
 ---
 
 ## Commits
 
-_(To be completed — one commit per fix on `bugfix/mixtape`, conventional commit format, e.g. `fix: remove Sunday weekday check blocking streak increment`.)_
+All three fixes are committed as separate commits on `bugfix/mixtape`, using conventional commit format:
+
+- `3a435e4` — `fix: remove incorrect Sunday exception blocking streak increment`
+- `38f1d38` — `fix: notify song sharer when their song is rated`
+- `5b3bef1` — `fix: reduce listening-now threshold from 24 hours to 30 minutes`
 
 ## Screenshot
 
-_(To be added — `git log --oneline` on `bugfix/mixtape` showing separate commits per fix.)_
+![git log output](Screenshot%202026-07-06%20at%209.55.13%20PM.png)
